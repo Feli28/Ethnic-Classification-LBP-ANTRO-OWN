@@ -1,3 +1,4 @@
+
 import hashlib
 import threading
 from pathlib import Path
@@ -9,7 +10,11 @@ import numpy as np
 import streamlit as st
 from facenet_pytorch import MTCNN
 from PIL import Image
-from streamlit_webrtc import VideoProcessorBase, WebRtcMode, webrtc_streamer
+from streamlit_webrtc import (
+    VideoProcessorBase,
+    WebRtcMode,
+    webrtc_streamer,
+)
 
 from feature_extraction import (
     detect_landmarks,
@@ -21,6 +26,7 @@ from feature_extraction import (
 # =========================================================
 # 1. KONFIGURASI
 # =========================================================
+
 st.set_page_config(
     page_title="Klasifikasi Etnis Wajah",
     page_icon="👤",
@@ -34,7 +40,6 @@ IMAGE_SIZE = (510, 510)
 DETECTION_THRESHOLD = 0.95
 WEBCAM_PROCESS_EVERY_N_FRAMES = 10
 
-# Nama file disesuaikan dengan isi folder models pada screenshot.
 ANTRO_MODEL_PATH = MODEL_DIR / "antro_own_1738_svm.pkl"
 ANTRO_SCALER_PATH = MODEL_DIR / "antro_own_1738_scaler.pkl"
 
@@ -42,54 +47,19 @@ LBP_MODEL_PATH = MODEL_DIR / "lbp3x3_own_1738_svm.pkl"
 LBP_SCALER_PATH = MODEL_DIR / "lbp3x3_own_1738_scaler.pkl"
 
 RTC_CONFIGURATION = {
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]}
+    ]
 }
 
 
 # =========================================================
-# 2. FUNGSI TAMPILAN GAMBAR
+# 2. MEMUAT MODEL DAN MTCNN
 # =========================================================
-def show_image(image, caption=None, width=640):
-    """Tampilkan gambar sebagai PIL Image."""
-    try:
-        if isinstance(image, Image.Image):
-            image_pil = image.convert("RGB")
-        else:
-            image_array = np.asarray(image)
 
-            if image_array.ndim == 2:
-                image_array = cv2.cvtColor(
-                    image_array, cv2.COLOR_GRAY2RGB
-                )
-            elif image_array.ndim == 3 and image_array.shape[2] == 4:
-                image_array = cv2.cvtColor(
-                    image_array, cv2.COLOR_RGBA2RGB
-                )
-            elif image_array.ndim != 3 or image_array.shape[2] != 3:
-                st.error(
-                    f"Format gambar tidak didukung: {image_array.shape}"
-                )
-                return
-
-            if image_array.dtype != np.uint8:
-                image_array = np.clip(
-                    image_array, 0, 255
-                ).astype(np.uint8)
-
-            image_pil = Image.fromarray(
-                np.ascontiguousarray(image_array)
-            )
-
-        st.image(image_pil, caption=caption, width=width)
-    except Exception as exc:
-        st.error(f"Gambar gagal ditampilkan: {exc}")
-
-
-# =========================================================
-# 3. MEMUAT MODEL DAN MTCNN
-# =========================================================
 @st.cache_resource
 def load_models():
+
     paths = [
         ANTRO_MODEL_PATH,
         ANTRO_SCALER_PATH,
@@ -102,37 +72,42 @@ def load_models():
             raise FileNotFoundError(
                 f"File model tidak ditemukan: {path}"
             )
-        if path.stat().st_size == 0:
-            raise ValueError(f"File model kosong: {path}")
 
-    # Model antropometri disimpan terpisah:
-    # SVM classifier + StandardScaler.
+        if path.stat().st_size == 0:
+            raise ValueError(
+                f"File model kosong: {path}"
+            )
+
     antro_model = joblib.load(ANTRO_MODEL_PATH)
     antro_scaler = joblib.load(ANTRO_SCALER_PATH)
 
-    # Model LBP disimpan sebagai seluruh Pipeline:
-    # SimpleImputer + StandardScaler + SVC.
-    # Karena itu, prediksi LBP harus menggunakan pipeline secara langsung.
+    # Pipeline LBP sudah berisi preprocessing dan classifier.
     lbp_pipeline = joblib.load(LBP_MODEL_PATH)
 
-    # Scaler LBP juga dimuat karena tersedia sebagai file terpisah.
-    # Scaler ini tidak diterapkan lagi pada prediksi karena sudah menjadi
-    # bagian dari lbp_pipeline.
+    # Tetap dimuat karena file scaler tersedia di repository.
+    # Tidak digunakan lagi secara manual karena scaler sudah ada
+    # di dalam pipeline LBP.
     lbp_scaler = joblib.load(LBP_SCALER_PATH)
 
+    if not hasattr(antro_model, "predict"):
+        raise TypeError("Model antropometri tidak valid.")
+
     if not hasattr(lbp_pipeline, "predict"):
-        raise TypeError(
-            "File model LBP tidak berisi objek model/pipeline yang valid."
-        )
+        raise TypeError("Model LBP tidak valid.")
 
     if hasattr(lbp_pipeline, "named_steps"):
-        required_steps = {"imputer", "scaler", "classifier"}
+        required_steps = {
+            "imputer",
+            "scaler",
+            "classifier",
+        }
+
         actual_steps = set(lbp_pipeline.named_steps.keys())
         missing_steps = required_steps - actual_steps
 
         if missing_steps:
             raise ValueError(
-                "Pipeline LBP tidak memiliki komponen yang diharapkan: "
+                "Komponen pipeline LBP tidak lengkap: "
                 f"{sorted(missing_steps)}"
             )
 
@@ -146,19 +121,24 @@ def load_models():
 
 @st.cache_resource
 def load_mtcnn():
-    return MTCNN(keep_all=True, device="cpu")
+    return MTCNN(
+        keep_all=True,
+        device="cpu",
+    )
 
 
 # =========================================================
-# 4. DETEKSI DAN CROP WAJAH
+# 3. DETEKSI WAJAH
 # =========================================================
+
 def detect_face_boxes(
     image_pil,
     mtcnn,
-    threshold=DETECTION_THRESHOLD
+    threshold=DETECTION_THRESHOLD,
 ):
-    """Mengembalikan bounding box dan skor deteksi MTCNN."""
+
     image_pil = image_pil.convert("RGB")
+
     boxes, probabilities = mtcnn.detect(image_pil)
 
     if boxes is None or probabilities is None:
@@ -167,6 +147,7 @@ def detect_face_boxes(
     detections = []
 
     for box, probability in zip(boxes, probabilities):
+
         if box is None or probability is None:
             continue
 
@@ -175,6 +156,7 @@ def detect_face_boxes(
 
         if box.shape != (4,) or not np.isfinite(box).all():
             continue
+
         if (
             not np.isfinite(probability)
             or probability < threshold
@@ -186,57 +168,91 @@ def detect_face_boxes(
         if x2 > x1 and y2 > y1:
             detections.append((box, probability))
 
+    # Urutkan wajah dari kiri ke kanan.
     detections.sort(key=lambda item: item[0][0])
+
     return detections
 
 
+# =========================================================
+# 4. CROP WAJAH
+# =========================================================
+
 def crop_face_from_box(image_pil, box):
-    """Crop wajah dan resize ke 510x510."""
+
     image_pil = image_pil.convert("RGB")
+
     image_width, image_height = image_pil.size
 
     x1, y1, x2, y2 = map(float, box)
+
     box_width = x2 - x1
     box_height = y2 - y1
 
     if box_width <= 0 or box_height <= 0:
-        raise ValueError("Bounding box wajah tidak valid.")
+        raise ValueError(
+            "Bounding box wajah tidak valid."
+        )
 
     center_x = x1 + box_width / 2
-    center_y = y1 + box_height / 2 + box_height * 0.05
-    half_side = max(box_width, box_height) * 0.95 / 2
 
-    left = max(0, int(round(center_x - half_side)))
-    top = max(0, int(round(center_y - half_side)))
-    right = min(image_width, int(round(center_x + half_side)))
-    bottom = min(image_height, int(round(center_y + half_side)))
+    center_y = (
+        y1
+        + box_height / 2
+        + box_height * 0.05
+    )
+
+    half_side = max(
+        box_width,
+        box_height,
+    ) * 0.95 / 2
+
+    left = max(
+        0,
+        int(round(center_x - half_side)),
+    )
+
+    top = max(
+        0,
+        int(round(center_y - half_side)),
+    )
+
+    right = min(
+        image_width,
+        int(round(center_x + half_side)),
+    )
+
+    bottom = min(
+        image_height,
+        int(round(center_y + half_side)),
+    )
 
     if right <= left or bottom <= top:
         raise ValueError(
             "Hasil crop wajah kosong atau tidak valid."
         )
 
-    cropped = image_pil.crop((left, top, right, bottom))
+    cropped = image_pil.crop(
+        (left, top, right, bottom)
+    )
 
     return cropped.resize(
         IMAGE_SIZE,
-        Image.Resampling.LANCZOS
+        Image.Resampling.LANCZOS,
     )
 
 
 # =========================================================
-# 5. EKSTRAKSI FITUR DAN PREDIKSI
+# 5. PREDIKSI ANTROPOMETRI 22 FITUR
 # =========================================================
+
 def predict_antro(image_bgr, model, scaler):
-    """
-    Prediksi antropometri:
-    ekstraksi 22 fitur -> StandardScaler -> SVM classifier.
-    """
+
     landmarks_list = detect_landmarks(image_bgr)
 
     if not landmarks_list:
         raise ValueError(
-            "MediaPipe gagal mendeteksi landmark pada crop wajah."
+            "MediaPipe gagal mendeteksi landmark wajah."
         )
 
     features = np.asarray(
@@ -246,7 +262,7 @@ def predict_antro(image_bgr, model, scaler):
 
     if features.shape[1] != 22:
         raise ValueError(
-            "Model Antropometri memerlukan 22 fitur, "
+            "Model antropometri memerlukan 22 fitur, "
             f"ditemukan {features.shape[1]}."
         )
 
@@ -256,19 +272,20 @@ def predict_antro(image_bgr, model, scaler):
         )
 
     features_scaled = scaler.transform(features)
-    prediction = model.predict(features_scaled)
 
-    return str(prediction[0])
+    prediction = model.predict(features_scaled)[0]
 
+    # Mengikuti repository lama:
+    # hasil predict ditampilkan secara langsung.
+    return str(prediction)
+
+
+# =========================================================
+# 6. PREDIKSI LBP GRID 3x3
+# =========================================================
 
 def predict_lbp(image_bgr, lbp_pipeline):
-    """
-    Prediksi LBP Grid 3x3:
-    ekstraksi 2304 fitur -> seluruh pipeline (imputer + scaler + SVM).
 
-    Jangan melakukan scaler.transform() secara manual di sini,
-    karena StandardScaler sudah berada di dalam pipeline yang disimpan.
-    """
     features = np.asarray(
         extract_lbp(image_bgr),
         dtype=np.float32,
@@ -276,25 +293,28 @@ def predict_lbp(image_bgr, lbp_pipeline):
 
     if features.shape[1] != 2304:
         raise ValueError(
-            "Model LBP Grid 3x3 memerlukan 2304 fitur, "
+            "Model LBP memerlukan 2304 fitur, "
             f"ditemukan {features.shape[1]}."
         )
 
-    # Pipeline memiliki SimpleImputer, sehingga nilai NaN dapat
-    # ditangani sesuai median yang dipelajari saat training.
-    # Infinity tetap tidak valid untuk diproses.
     if np.isinf(features).any():
         raise ValueError(
             "Fitur LBP mengandung nilai infinity."
         )
 
-    prediction = lbp_pipeline.predict(features)
+    # Pipeline sudah mencakup imputer, scaler, dan classifier.
+    prediction = lbp_pipeline.predict(features)[0]
 
-    return str(prediction[0])
+    # Mengikuti repository lama.
+    return str(prediction)
 
+
+# =========================================================
+# 7. PREDIKSI SETIAP WAJAH
+# =========================================================
 
 def predict_faces(image_pil, method, models, mtcnn):
-    """Deteksi dan prediksi setiap wajah secara terpisah."""
+
     (
         antro_model,
         antro_scaler,
@@ -302,12 +322,18 @@ def predict_faces(image_pil, method, models, mtcnn):
         _lbp_scaler,
     ) = models
 
-    detections = detect_face_boxes(image_pil, mtcnn)
+    detections = detect_face_boxes(
+        image_pil,
+        mtcnn,
+    )
+
     results = []
 
     for index, (box, detection_probability) in enumerate(
-        detections, start=1
+        detections,
+        start=1,
     ):
+
         result = {
             "index": index,
             "box": box,
@@ -318,7 +344,11 @@ def predict_faces(image_pil, method, models, mtcnn):
         }
 
         try:
-            cropped = crop_face_from_box(image_pil, box)
+
+            cropped = crop_face_from_box(
+                image_pil,
+                box,
+            )
 
             image_bgr = cv2.cvtColor(
                 np.asarray(cropped),
@@ -326,12 +356,15 @@ def predict_faces(image_pil, method, models, mtcnn):
             )
 
             if method == "Antropometri 22 Fitur":
+
                 prediction = predict_antro(
                     image_bgr,
                     antro_model,
                     antro_scaler,
                 )
+
             else:
+
                 prediction = predict_lbp(
                     image_bgr,
                     lbp_pipeline,
@@ -341,6 +374,7 @@ def predict_faces(image_pil, method, models, mtcnn):
             result["prediction"] = prediction
 
         except Exception as exc:
+
             result["error"] = str(exc)
 
         results.append(result)
@@ -349,9 +383,11 @@ def predict_faces(image_pil, method, models, mtcnn):
 
 
 # =========================================================
-# 6. VISUALISASI HASIL
+# 8. LABEL DAN KOTAK WAJAH
 # =========================================================
+
 def draw_label(image_bgr, x1, y1, label):
+
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.55
     thickness = 2
@@ -363,12 +399,21 @@ def draw_label(image_bgr, x1, y1, label):
         thickness,
     )
 
-    label_y = max(y1 - 8, text_height + 8)
+    label_y = max(
+        y1 - 8,
+        text_height + 8,
+    )
 
     cv2.rectangle(
         image_bgr,
-        (x1, label_y - text_height - 8),
-        (x1 + text_width + 8, label_y + baseline),
+        (
+            x1,
+            label_y - text_height - 8,
+        ),
+        (
+            x1 + text_width + 8,
+            label_y + baseline,
+        ),
         (0, 150, 0),
         -1,
     )
@@ -386,7 +431,7 @@ def draw_label(image_bgr, x1, y1, label):
 
 
 def draw_face_boxes(image_pil, results):
-    """Mengembalikan gambar RGB dengan kotak dan label prediksi."""
+
     image_bgr = cv2.cvtColor(
         np.asarray(image_pil.convert("RGB")),
         cv2.COLOR_RGB2BGR,
@@ -395,7 +440,11 @@ def draw_face_boxes(image_pil, results):
     height, width = image_bgr.shape[:2]
 
     for result in results:
-        x1, y1, x2, y2 = map(int, result["box"])
+
+        x1, y1, x2, y2 = map(
+            int,
+            result["box"],
+        )
 
         x1 = max(0, min(x1, width - 1))
         x2 = max(0, min(x2, width - 1))
@@ -411,28 +460,49 @@ def draw_face_boxes(image_pil, results):
         )
 
         if result["prediction"]:
+
             label = (
                 f"Wajah {result['index']}: "
                 f"{result['prediction']}"
             )
+
         elif result["error"]:
-            label = f"Wajah {result['index']}: gagal"
+
+            label = (
+                f"Wajah {result['index']}: gagal"
+            )
+
         else:
+
             label = f"Wajah {result['index']}"
 
-        draw_label(image_bgr, x1, y1, label)
+        draw_label(
+            image_bgr,
+            x1,
+            y1,
+            label,
+        )
 
-    return cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    return cv2.cvtColor(
+        image_bgr,
+        cv2.COLOR_BGR2RGB,
+    )
 
+
+# =========================================================
+# 9. MENAMPILKAN HASIL PREDIKSI
+# =========================================================
 
 def show_face_results(results):
+
     if not results:
+
         st.warning(
-            "Tidak ada wajah yang terdeteksi dengan confidence MTCNN "
-            f"minimal {DETECTION_THRESHOLD:.2f}. "
-            "Pastikan wajah terlihat jelas. Jika perlu, ubah "
-            "DETECTION_THRESHOLD menjadi 0.90."
+            "Tidak ada wajah yang terdeteksi dengan "
+            f"confidence MTCNN minimal {DETECTION_THRESHOLD:.2f}. "
+            "Pastikan wajah terlihat jelas."
         )
+
         return
 
     st.success(
@@ -440,50 +510,74 @@ def show_face_results(results):
     )
 
     for result in results:
-        st.markdown(f"### Wajah {result['index']}")
+
+        st.markdown(
+            f"### Wajah {result['index']}"
+        )
 
         col_image, col_result = st.columns([1, 2])
 
         with col_image:
+
             if result["crop"] is not None:
+
                 st.image(
-                    np.array(result["crop"].convert("RGB")),
+                    np.array(
+                        result["crop"].convert("RGB")
+                    ),
                     caption="Crop wajah (510 x 510)",
                     width=300,
                 )
 
         with col_result:
+
             st.caption(
                 "Skor deteksi MTCNN: "
                 f"{result['detection_confidence']:.3f}"
             )
 
             if result["error"]:
+
                 st.error(
                     f"Prediksi gagal: {result['error']}"
                 )
+
             else:
+
                 st.success(
                     f"Hasil prediksi: **{result['prediction']}**"
                 )
 
 
 # =========================================================
-# 7. LIVE WEBCAM
+# 10. LIVE WEBCAM
 # =========================================================
+
 class WebcamProcessor(VideoProcessorBase):
+
     def __init__(self, models, mtcnn, method):
+
         self.models = models
         self.mtcnn = mtcnn
         self.method = method
+
         self.frame_count = 0
         self.last_boxes = []
         self.last_message = "Menunggu deteksi wajah..."
+
         self.lock = threading.Lock()
 
     def recv(self, frame):
-        image_bgr = frame.to_ndarray(format="bgr24")
-        image_bgr = cv2.flip(image_bgr, 1)
+
+        image_bgr = frame.to_ndarray(
+            format="bgr24"
+        )
+
+        image_bgr = cv2.flip(
+            image_bgr,
+            1,
+        )
+
         self.frame_count += 1
 
         if (
@@ -491,15 +585,20 @@ class WebcamProcessor(VideoProcessorBase):
             % WEBCAM_PROCESS_EVERY_N_FRAMES
             == 1
         ):
+
             try:
+
                 image_rgb = cv2.cvtColor(
                     image_bgr,
                     cv2.COLOR_BGR2RGB,
                 )
 
-                image_pil = Image.fromarray(image_rgb)
+                image_pil = Image.fromarray(
+                    image_rgb
+                )
 
                 with self.lock:
+
                     results = predict_faces(
                         image_pil,
                         self.method,
@@ -510,34 +609,47 @@ class WebcamProcessor(VideoProcessorBase):
                 new_boxes = []
 
                 for result in results:
+
                     x1, y1, x2, y2 = map(
-                        int, result["box"]
+                        int,
+                        result["box"],
                     )
 
-                    label = (
-                        f"Wajah {result['index']}: "
-                        f"{result['prediction']}"
-                        if result["prediction"]
-                        else f"Wajah {result['index']}: gagal"
-                    )
+                    if result["prediction"]:
+
+                        label = (
+                            f"Wajah {result['index']}: "
+                            f"{result['prediction']}"
+                        )
+
+                    else:
+
+                        label = (
+                            f"Wajah {result['index']}: gagal"
+                        )
 
                     new_boxes.append(
                         (x1, y1, x2, y2, label)
                     )
 
                 self.last_boxes = new_boxes
+
                 self.last_message = (
-                    "" if results
+                    ""
+                    if results
                     else "Wajah belum terdeteksi"
                 )
 
             except Exception as exc:
+
                 self.last_boxes = []
+
                 self.last_message = (
                     f"Error: {str(exc)[:100]}"
                 )
 
         for x1, y1, x2, y2, label in self.last_boxes:
+
             cv2.rectangle(
                 image_bgr,
                 (x1, y1),
@@ -554,6 +666,7 @@ class WebcamProcessor(VideoProcessorBase):
             )
 
         if self.last_message:
+
             cv2.putText(
                 image_bgr,
                 self.last_message[:100],
@@ -572,8 +685,9 @@ class WebcamProcessor(VideoProcessorBase):
 
 
 # =========================================================
-# 8. ANTARMUKA STREAMLIT
+# 11. ANTARMUKA STREAMLIT
 # =========================================================
+
 st.title("Klasifikasi Etnis Wajah")
 
 st.write(
@@ -601,21 +715,31 @@ source = st.radio(
     horizontal=True,
 )
 
+
+# =========================================================
+# 12. MEMUAT MODEL
+# =========================================================
+
 try:
+
     models = load_models()
     mtcnn = load_mtcnn()
 
 except Exception as exc:
+
     st.error(
         f"Gagal memuat model atau MTCNN: {exc}"
     )
+
     st.stop()
 
 
-# ---------------------------------------------------------
-# UPLOAD GAMBAR
-# ---------------------------------------------------------
+# =========================================================
+# 13. UPLOAD GAMBAR
+# =========================================================
+
 if source == "Upload Gambar":
+
     uploaded_file = st.file_uploader(
         "Upload citra wajah",
         type=["jpg", "jpeg", "png"],
@@ -623,11 +747,17 @@ if source == "Upload Gambar":
     )
 
     if uploaded_file is not None:
+
         try:
-            image = Image.open(uploaded_file).convert("RGB")
+
+            image = Image.open(
+                uploaded_file
+            ).convert("RGB")
+
             image_rgb = np.array(image)
 
             st.subheader("1. Gambar Input")
+
             st.image(
                 image_rgb,
                 caption="Gambar asli",
@@ -638,9 +768,11 @@ if source == "Upload Gambar":
                 "Prediksi",
                 type="primary",
             ):
+
                 with st.spinner(
                     "Mendeteksi dan memprediksi wajah..."
                 ):
+
                     results = predict_faces(
                         Image.fromarray(image_rgb),
                         method,
@@ -651,6 +783,7 @@ if source == "Upload Gambar":
                 st.subheader("2. Hasil Deteksi")
 
                 if results:
+
                     annotated_rgb = draw_face_boxes(
                         Image.fromarray(image_rgb),
                         results,
@@ -658,31 +791,43 @@ if source == "Upload Gambar":
 
                     st.image(
                         annotated_rgb,
-                        caption=(
-                            "Deteksi wajah dan hasil prediksi"
-                        ),
+                        caption="Deteksi wajah dan hasil prediksi",
                         width=450,
                     )
 
                 show_face_results(results)
 
         except Exception as exc:
-            st.error("Gagal memproses gambar.")
+
+            st.error(
+                "Gagal memproses gambar."
+            )
+
             st.exception(exc)
 
 
-# ---------------------------------------------------------
-# AMBIL FOTO
-# ---------------------------------------------------------
+# =========================================================
+# 14. AMBIL FOTO
+# =========================================================
+
 elif source == "Ambil Foto":
-    camera_image = st.camera_input("Ambil foto")
+
+    camera_image = st.camera_input(
+        "Ambil foto"
+    )
 
     if camera_image is not None:
+
         try:
-            image = Image.open(camera_image).convert("RGB")
+
+            image = Image.open(
+                camera_image
+            ).convert("RGB")
+
             image_rgb = np.array(image)
 
             st.subheader("1. Foto Input")
+
             st.image(
                 image_rgb,
                 caption="Foto yang akan diproses",
@@ -700,9 +845,11 @@ elif source == "Ambil Foto":
                 st.session_state.get("photo_cache_key")
                 != cache_key
             ):
+
                 with st.spinner(
                     "Mendeteksi dan memprediksi wajah..."
                 ):
+
                     results = predict_faces(
                         Image.fromarray(image_rgb),
                         method,
@@ -714,6 +861,7 @@ elif source == "Ambil Foto":
                 st.session_state["photo_results"] = results
 
             else:
+
                 results = st.session_state.get(
                     "photo_results",
                     [],
@@ -722,6 +870,7 @@ elif source == "Ambil Foto":
             st.subheader("2. Hasil Deteksi")
 
             if results:
+
                 annotated_rgb = draw_face_boxes(
                     Image.fromarray(image_rgb),
                     results,
@@ -729,23 +878,27 @@ elif source == "Ambil Foto":
 
                 st.image(
                     annotated_rgb,
-                    caption=(
-                        "Deteksi wajah dan hasil prediksi"
-                    ),
+                    caption="Deteksi wajah dan hasil prediksi",
                     width=450,
                 )
 
             show_face_results(results)
 
         except Exception as exc:
-            st.error("Gagal memproses foto.")
+
+            st.error(
+                "Gagal memproses foto."
+            )
+
             st.exception(exc)
 
 
-# ---------------------------------------------------------
-# LIVE WEBCAM
-# ---------------------------------------------------------
+# =========================================================
+# 15. LIVE WEBCAM
+# =========================================================
+
 elif source == "Live Webcam":
+
     st.info(
         "Klik START dan izinkan akses kamera browser. "
         "Gunakan HTTPS saat deploy agar izin kamera dapat diberikan."
@@ -754,25 +907,32 @@ elif source == "Live Webcam":
     ctx = webrtc_streamer(
         key=f"live-webcam-{method}",
         mode=WebRtcMode.SENDRECV,
+
         video_processor_factory=lambda: WebcamProcessor(
             models,
             mtcnn,
             method,
         ),
+
         rtc_configuration=RTC_CONFIGURATION,
+
         media_stream_constraints={
             "video": True,
             "audio": False,
         },
+
         async_processing=True,
     )
 
     if ctx.state.playing:
+
         st.caption(
             "Kotak dan label menunjukkan hasil prediksi terakhir. "
             "Pemrosesan dilakukan berkala untuk mengurangi beban CPU."
         )
+
     else:
+
         st.caption(
             "Webcam belum aktif. Periksa izin kamera browser, "
             "koneksi HTTPS, dan pastikan kamera tidak sedang "
